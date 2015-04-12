@@ -19,16 +19,16 @@ int mosquitto_auth_plugin_version(void)
 
 int mosquitto_auth_plugin_init(void **user_data, struct mosquitto_auth_opt *auth_opts, int auth_opt_count)
 {
-	mosquitto_log_printf(MOSQ_LOG_DEBUG, "Loaded mosquitto krb5 plugin");
-
+	unsigned char ret;
 	udata *udata = *user_data = calloc(1, sizeof(struct udata_t));
-	unsigned char ret = krb5_init_context(&udata->context);
 
-	if (ret)
+	if ((ret = krb5_init_context(&udata->context)))
 	{
-		mosquitto_log_printf(MOSQ_LOG_ERR, "Failed to create krb5 context");
+		mosquitto_log_printf(MOSQ_LOG_ERR, "Failed to create krb5 context: %d", (int) ret);
 		free(udata);
 	}
+	else
+		mosquitto_log_printf(MOSQ_LOG_DEBUG, "Loaded mosquitto krb5 plugin");
 
 	return ret;
 
@@ -40,7 +40,7 @@ int mosquitto_auth_plugin_cleanup(void *user_data, struct mosquitto_auth_opt *au
 {
 	udata *udata = user_data;
 	krb5_free_context(udata->context);
-	free(user_data);
+	free(udata);
 	return 0;
 
 	(void) auth_opts;
@@ -49,11 +49,11 @@ int mosquitto_auth_plugin_cleanup(void *user_data, struct mosquitto_auth_opt *au
 
 int mosquitto_auth_security_init(void *user_data, struct mosquitto_auth_opt *auth_opts, int auth_opt_count, bool reload)
 {
+	unsigned char ret;
 	udata *udata = user_data;
-	unsigned char ret = krb5_kt_resolve(udata->context, "FILE:/tmp/mqtt.keytab", &udata->keytab);
 
-	if (ret)
-		mosquitto_log_printf(MOSQ_LOG_ERR, "Failed to create krb5 keytab");
+	if ((ret = krb5_kt_resolve(udata->context, "FILE:/tmp/mqtt.keytab", &udata->keytab)))
+		mosquitto_log_printf(MOSQ_LOG_ERR, "Failed to create krb5 keytab: %d", (int) ret);
 
 	return ret;
 
@@ -75,8 +75,7 @@ int mosquitto_auth_security_cleanup(void *user_data, struct mosquitto_auth_opt *
 
 int mosquitto_auth_acl_check(void *user_data, const char *clientid, const char *username, const char *topic, int access)
 {
-	// FIXME
-	return MOSQ_ERR_SUCCESS;
+	return MOSQ_ERR_SUCCESS; // No ACL
 
 	(void) user_data;
 	(void) clientid;
@@ -85,91 +84,98 @@ int mosquitto_auth_acl_check(void *user_data, const char *clientid, const char *
 	(void) access;
 }
 
-static void decode_request(krb5_data *req, const char *encoded)
+static int decode_request(krb5_data *req, const char *encoded)
 {
-	sscanf(encoded, "%08x%08x", &req->magic, &req->length);
-	req->data = calloc(1, req->length);
+	if (strlen(encoded) < 16)
+		return 0;
+
+	if (sscanf(encoded, "%08x%08x", &req->magic, &req->length) != 2)
+		return 0;
+
+	if (strlen(encoded+16) < req->length)
+		return 0;
+
+	char *o = req->data = calloc(1, req->length);
 	const char *c = encoded+16;
-	char *o = req->data;
-	int wasEscaped = 0;
-	for (unsigned int i = 0; i < strlen(encoded+16); ++i, ++c)
-		switch(*c)
+	for (unsigned int i = 0, wasEscaped = 0; i < strlen(encoded+16); ++i, ++c, ++o)
+		switch(*o = *c)
 		{
 		case 1:
-			if (wasEscaped)
-			{
-				*o++ = 1;
-				wasEscaped = 0;
-			}
-			else
-				wasEscaped = 1;
+			if ((wasEscaped = !wasEscaped))
+				--o;
 			break;
 		case 2:
 			if (wasEscaped)
-			{
-				*o++ = 0;
-				wasEscaped = 0;
-			}
-			else
-				*o++ = 2;
+				*o = wasEscaped = 0;
 			break;
 		default:
-			*o++ = *c;
 			wasEscaped = 0;
 			break;
 		}
+
+	return 1;
+}
+
+static int check_principal(krb5_context context, const char *username, krb5_principal client)
+{
+	unsigned char ret;
+	krb5_principal target_principal;
+
+	if ((ret = krb5_parse_name(context, username, &target_principal)))
+	{
+		mosquitto_log_printf(MOSQ_LOG_ERR, "Failed to create target principal: %d", (int) ret);
+		return 0;
+	}
+
+	krb5_boolean success = krb5_principal_compare(context, client, target_principal);
+	krb5_free_principal(context, target_principal);
+
+	return success ? 1 : 0;
 }
 
 int mosquitto_auth_unpwd_check(void *user_data, const char *username, const char *password)
 {
 	udata *udata = user_data;
-	krb5_ticket *ticket;
-	krb5_auth_context authcon;
+
 	krb5_data req;
 	char *principal;
-	krb5_principal target_principal;
+	unsigned char ret;
+	krb5_ticket *ticket;
+	krb5_auth_context authcon;
 
-	unsigned char ret = krb5_auth_con_init(udata->context, &authcon);
-	if (ret)
+	if ((ret = krb5_auth_con_init(udata->context, &authcon)))
 	{
-		mosquitto_log_printf(MOSQ_LOG_ERR, "Failed to create auth context");
+		mosquitto_log_printf(MOSQ_LOG_ERR, "Failed to create auth context: %d", (int) ret);
 		return MOSQ_ERR_UNKNOWN;
 	}
 
-	decode_request(&req, password);
+	if (!decode_request(&req, password))
+	{
+		mosquitto_log_printf(MOSQ_LOG_ERR, "Failed to decode password as serialized krb5 REQ");
+		return MOSQ_ERR_UNKNOWN;
+	}
 
 	ret = krb5_rd_req(udata->context, &authcon, &req, NULL, udata->keytab, NULL, &ticket);
 	free(req.data);
 	krb5_auth_con_free(udata->context, authcon);
+
 	if (ret)
 	{
-		mosquitto_log_printf(MOSQ_LOG_ERR, "Failed to decode request: %d", (int) ret);
+		mosquitto_log_printf(MOSQ_LOG_ERR, "Failed to decode krb5 REQ: %d", (int) ret);
 		return MOSQ_ERR_UNKNOWN;
 	}
 
-	ret = krb5_unparse_name(udata->context, ticket->enc_part2->client, &principal);
-	if (ret)
+	if ((ret = krb5_unparse_name(udata->context, ticket->enc_part2->client, &principal)))
 	{
-		mosquitto_log_printf(MOSQ_LOG_ERR, "Failed to decode principal in request");
+		mosquitto_log_printf(MOSQ_LOG_ERR, "Failed to decode principal in request: %d", (int) ret);
 		return MOSQ_ERR_UNKNOWN;
 	}
 
 	mosquitto_log_printf(MOSQ_LOG_INFO, "krb5 login attempt for principal: %s", principal);
-
-	ret = krb5_parse_name(udata->context, username, &target_principal);
-	if (ret)
-	{
-		mosquitto_log_printf(MOSQ_LOG_ERR, "Failed to create target principal");
-		krb5_free_string(udata->context, principal);
-		return MOSQ_ERR_UNKNOWN;
-	}
-
-	krb5_boolean success = krb5_principal_compare(udata->context, ticket->enc_part2->client, target_principal);
-
-	krb5_free_principal(udata->context, target_principal);
 	krb5_free_string(udata->context, principal);
 
-	return success ? MOSQ_ERR_SUCCESS : MOSQ_ERR_AUTH;
+	return check_principal(udata->context, username, ticket->enc_part2->client) ?
+		MOSQ_ERR_SUCCESS : MOSQ_ERR_AUTH;
 }
 
 int mosquitto_auth_psk_key_get(void *user_data, const char *hint, const char *identity, char *key, int max_key_len)
