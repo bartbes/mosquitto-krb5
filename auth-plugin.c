@@ -37,8 +37,7 @@ static int valid_format(const char *format)
 			inFormat = !inFormat;
 			break;
 		case 's':
-			if (inFormat)
-				if (seenSubst++ != 0)
+			if (inFormat && seenSubst++ != 0)
 					return 0;
 			inFormat = 0;
 			break;
@@ -86,9 +85,6 @@ int mosquitto_auth_plugin_init(void **user_data, struct mosquitto_auth_opt *auth
 
 	mosquitto_log_printf(MOSQ_LOG_DEBUG, "Loaded mosquitto krb5 plugin");
 	return 0;
-
-	(void) auth_opts;
-	(void) auth_opt_count;
 }
 
 int mosquitto_auth_plugin_cleanup(void *user_data, struct mosquitto_auth_opt *auth_opts, int auth_opt_count)
