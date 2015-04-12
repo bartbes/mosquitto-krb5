@@ -12,6 +12,14 @@ typedef struct udata_t
 	krb5_keytab keytab;
 } udata;
 
+static void report_error(udata *udata, const char *msg, krb5_error_code code)
+{
+	unsigned char readableCode = code;
+	const char *errmsg = krb5_get_error_message(udata->context, code);
+	mosquitto_log_printf(MOSQ_LOG_ERR, "%s: %s (%d)", msg, errmsg, readableCode);
+	krb5_free_error_message(udata->context, errmsg);
+}
+
 int mosquitto_auth_plugin_version(void)
 {
 	return MOSQ_AUTH_PLUGIN_VERSION;
@@ -19,12 +27,12 @@ int mosquitto_auth_plugin_version(void)
 
 int mosquitto_auth_plugin_init(void **user_data, struct mosquitto_auth_opt *auth_opts, int auth_opt_count)
 {
-	unsigned char ret;
+	krb5_error_code ret;
 	udata *udata = *user_data = calloc(1, sizeof(struct udata_t));
 
 	if ((ret = krb5_init_context(&udata->context)))
 	{
-		mosquitto_log_printf(MOSQ_LOG_ERR, "Failed to create krb5 context: %d", (int) ret);
+		report_error(udata, "Failed to create KRB5 context", ret);
 		free(udata);
 	}
 	else
@@ -49,16 +57,27 @@ int mosquitto_auth_plugin_cleanup(void *user_data, struct mosquitto_auth_opt *au
 
 int mosquitto_auth_security_init(void *user_data, struct mosquitto_auth_opt *auth_opts, int auth_opt_count, bool reload)
 {
-	unsigned char ret;
+	krb5_error_code ret;
 	udata *udata = user_data;
 
-	if ((ret = krb5_kt_resolve(udata->context, "FILE:/tmp/mqtt.keytab", &udata->keytab)))
-		mosquitto_log_printf(MOSQ_LOG_ERR, "Failed to create krb5 keytab: %d", (int) ret);
+	const char *keytab = 0;
+	for (int i = 0; i < auth_opt_count; ++i)
+		if (!strcmp(auth_opts[i].key, "keytab"))
+			keytab = auth_opts[i].value;
 
-	return ret;
+	if (keytab)
+		ret = krb5_kt_resolve(udata->context, keytab, &udata->keytab);
+	else
+		ret = krb5_kt_default(udata->context, &udata->keytab);
 
-	(void) auth_opts;
-	(void) auth_opt_count;
+	if (ret)
+	{
+		report_error(udata, "Failed to create krb5 keytab", ret);
+		return MOSQ_ERR_UNKNOWN;
+	}
+
+	return 0;
+
 	(void) reload;
 }
 
@@ -116,19 +135,19 @@ static int decode_request(krb5_data *req, const char *encoded)
 	return 1;
 }
 
-static int check_principal(krb5_context context, const char *username, krb5_principal client)
+static int check_principal(udata *udata, const char *username, krb5_principal client)
 {
-	unsigned char ret;
+	krb5_error_code ret;
 	krb5_principal target_principal;
 
-	if ((ret = krb5_parse_name(context, username, &target_principal)))
+	if ((ret = krb5_parse_name(udata->context, username, &target_principal)))
 	{
-		mosquitto_log_printf(MOSQ_LOG_ERR, "Failed to create target principal: %d", (int) ret);
+		report_error(udata, "Failed to create target principal", ret);
 		return 0;
 	}
 
-	krb5_boolean success = krb5_principal_compare(context, client, target_principal);
-	krb5_free_principal(context, target_principal);
+	krb5_boolean success = krb5_principal_compare(udata->context, client, target_principal);
+	krb5_free_principal(udata->context, target_principal);
 
 	return success ? 1 : 0;
 }
@@ -139,13 +158,13 @@ int mosquitto_auth_unpwd_check(void *user_data, const char *username, const char
 
 	krb5_data req;
 	char *principal;
-	unsigned char ret;
+	krb5_error_code ret;
 	krb5_ticket *ticket;
 	krb5_auth_context authcon;
 
 	if ((ret = krb5_auth_con_init(udata->context, &authcon)))
 	{
-		mosquitto_log_printf(MOSQ_LOG_ERR, "Failed to create auth context: %d", (int) ret);
+		report_error(udata, "Failed to create auth context", ret);
 		return MOSQ_ERR_UNKNOWN;
 	}
 
@@ -161,20 +180,20 @@ int mosquitto_auth_unpwd_check(void *user_data, const char *username, const char
 
 	if (ret)
 	{
-		mosquitto_log_printf(MOSQ_LOG_ERR, "Failed to decode krb5 REQ: %d", (int) ret);
+		report_error(udata, "Failed to decode krb5 REQ", ret);
 		return MOSQ_ERR_UNKNOWN;
 	}
 
 	if ((ret = krb5_unparse_name(udata->context, ticket->enc_part2->client, &principal)))
 	{
-		mosquitto_log_printf(MOSQ_LOG_ERR, "Failed to decode principal in request: %d", (int) ret);
+		report_error(udata, "Failed to decode principal in request", ret);
 		return MOSQ_ERR_UNKNOWN;
 	}
 
 	mosquitto_log_printf(MOSQ_LOG_INFO, "krb5 login attempt for principal: %s", principal);
 	krb5_free_string(udata->context, principal);
 
-	return check_principal(udata->context, username, ticket->enc_part2->client) ?
+	return check_principal(udata, username, ticket->enc_part2->client) ?
 		MOSQ_ERR_SUCCESS : MOSQ_ERR_AUTH;
 }
 
