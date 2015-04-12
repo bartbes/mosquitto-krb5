@@ -58,5 +58,31 @@ Also note that the hostname passed to mosquitto_connect_srv is also the one
 used, meaning that the principal requested may not be the one belonging to the
 actual host connected to.
 
+
+Compilation
+-----------
+
+To compile this project you will need:
+
+ - A C99-compatible C compiler
+ - pkg-config
+ - libkrb5 (only tested with MIT kerberos so far)
+ - [mosquitto][]/libmosquitto
+ - A kerberos domain, preferably one you are an admin of
+
+The commands `make` or `make all` build both the auth-plugin and the
+client-preload. The `clean` target will, as per usual, remove the output files.
+Similarly, using the output file names as targets will build only that
+particular module.
+
+For testing purposes `make server` starts a mosquitto broker with extra
+verbosity enabled, and using the `mosquitto.conf` also in this repository, it
+presumes that a keytab `mqtt.keytab` has been placed in this directory, contain
+the key(s) for the broker.
+
+Similarly, `make client` verbosely publishes a message to the broker running on
+localhost (typically corresponding to the fqdn `localhost.localdomain`) using
+your own user name.
+
 [mosquitto]: http://mosquitto.org
 [mosquitto-auth-plug]: https://github.com/jpmens/mosquitto-auth-plug
