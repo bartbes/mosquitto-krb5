@@ -86,7 +86,7 @@ int mosquitto_auth_acl_check(void *user_data, const char *clientid, const char *
 
 static int decode_request(krb5_data *req, const char *encoded)
 {
-	if (strlen(encoded) < 16)
+	if (!encoded || strlen(encoded) < 16)
 		return 0;
 
 	if (sscanf(encoded, "%08x%08x", &req->magic, &req->length) != 2)
