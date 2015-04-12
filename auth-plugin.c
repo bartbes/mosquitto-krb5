@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <string.h>
 
@@ -10,6 +11,7 @@ typedef struct udata_t
 {
 	krb5_context context;
 	krb5_keytab keytab;
+	char *principal_format;
 } udata;
 
 static void report_error(udata *udata, const char *msg, krb5_error_code code)
@@ -25,6 +27,33 @@ int mosquitto_auth_plugin_version(void)
 	return MOSQ_AUTH_PLUGIN_VERSION;
 }
 
+static int valid_format(const char *format)
+{
+	int inFormat = 0, seenSubst = 0;
+	for (const char *c = format; *c; ++c)
+		switch(*c)
+		{
+		case '%':
+			inFormat = !inFormat;
+			break;
+		case 's':
+			if (inFormat)
+				if (seenSubst++ != 0)
+					return 0;
+			inFormat = 0;
+			break;
+		default:
+			if (inFormat)
+				return 0;
+			break;
+		}
+
+	if (!seenSubst)
+		mosquitto_log_printf(MOSQ_LOG_WARNING, "No substitutions in principal_format!");
+
+	return !inFormat;
+}
+
 int mosquitto_auth_plugin_init(void **user_data, struct mosquitto_auth_opt *auth_opts, int auth_opt_count)
 {
 	krb5_error_code ret;
@@ -34,11 +63,29 @@ int mosquitto_auth_plugin_init(void **user_data, struct mosquitto_auth_opt *auth
 	{
 		report_error(udata, "Failed to create KRB5 context", ret);
 		free(udata);
+		return 1;
 	}
-	else
-		mosquitto_log_printf(MOSQ_LOG_DEBUG, "Loaded mosquitto krb5 plugin");
 
-	return ret;
+	for (int i = 0; i < auth_opt_count; ++i)
+		if (!strcmp(auth_opts[i].key, "principal_format"))
+		{
+			udata->principal_format = strdup(auth_opts[i].value);
+			break;
+		}
+
+	if (!udata->principal_format)
+		udata->principal_format = strdup("%s");
+
+	if (!valid_format(udata->principal_format))
+	{
+		mosquitto_log_printf(MOSQ_LOG_ERR, "Invalid principal_format");
+		free(udata->principal_format);
+		free(udata);
+		return 1;
+	}
+
+	mosquitto_log_printf(MOSQ_LOG_DEBUG, "Loaded mosquitto krb5 plugin");
+	return 0;
 
 	(void) auth_opts;
 	(void) auth_opt_count;
@@ -48,6 +95,9 @@ int mosquitto_auth_plugin_cleanup(void *user_data, struct mosquitto_auth_opt *au
 {
 	udata *udata = user_data;
 	krb5_free_context(udata->context);
+	if (udata->principal_format)
+		free(udata->principal_format);
+
 	free(udata);
 	return 0;
 
@@ -139,8 +189,11 @@ static int check_principal(udata *udata, const char *username, krb5_principal cl
 {
 	krb5_error_code ret;
 	krb5_principal target_principal;
+	static char principalbuffer[1000];
 
-	if ((ret = krb5_parse_name(udata->context, username, &target_principal)))
+	snprintf(principalbuffer, sizeof(principalbuffer), udata->principal_format, username);
+
+	if ((ret = krb5_parse_name(udata->context, principalbuffer, &target_principal)))
 	{
 		report_error(udata, "Failed to create target principal", ret);
 		return 0;
