@@ -52,7 +52,7 @@ configuration.
 
 Note that it uses the hostname passed to mosquitto_connect and friends to obtain
 the principal name for the broker, and depending on your krb5 configuration,
-this may then be expanded into a fqdn and resolved using reverse dns.
+this may then be expanded into a FQDN And resolved using reverse dns.
 
 Also note that the hostname passed to mosquitto_connect_srv is also the one
 used, meaning that the principal requested may not be the one belonging to the
@@ -77,11 +77,11 @@ particular module.
 
 For testing purposes `make server` starts a mosquitto broker with extra
 verbosity enabled, and using the `mosquitto.conf` also in this repository, it
-presumes that a keytab `mqtt.keytab` has been placed in this directory, contain
-the key(s) for the broker.
+presumes that a keytab `mqtt.keytab` has been placed in this directory,
+containing the key(s) for the broker.
 
 Similarly, `make client` verbosely publishes a message to the broker running on
-localhost (typically corresponding to the fqdn `localhost.localdomain`) using
+localhost (typically corresponding to the FQDN `localhost.localdomain`) using
 your own user name.
 
 [mosquitto]: http://mosquitto.org
